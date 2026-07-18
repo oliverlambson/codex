@@ -19,7 +19,33 @@ use ratatui::layout::Size;
 /// - getting the terminal size
 /// - getting the cursor position
 pub struct VT100Backend {
-    crossterm_backend: CrosstermBackend<vt100::Parser>,
+    crossterm_backend: CrosstermBackend<RecordingWriter>,
+}
+
+struct RecordingWriter {
+    parser: vt100::Parser,
+    output: Vec<u8>,
+}
+
+impl RecordingWriter {
+    fn new(width: u16, height: u16) -> Self {
+        Self {
+            parser: vt100::Parser::new(height, width, 0),
+            output: Vec::new(),
+        }
+    }
+}
+
+impl Write for RecordingWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let written = self.parser.write(buf)?;
+        self.output.extend_from_slice(&buf[..written]);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.parser.flush()
+    }
 }
 
 impl VT100Backend {
@@ -27,12 +53,19 @@ impl VT100Backend {
     pub fn new(width: u16, height: u16) -> Self {
         crossterm::style::force_color_output(true);
         Self {
-            crossterm_backend: CrosstermBackend::new(vt100::Parser::new(height, width, 0)),
+            crossterm_backend: CrosstermBackend::new(RecordingWriter::new(width, height)),
         }
     }
 
     pub fn vt100(&self) -> &vt100::Parser {
-        self.crossterm_backend.writer()
+        &self.crossterm_backend.writer().parser
+    }
+
+    // This shared test backend is also compiled by integration test binaries that do not inspect
+    // its byte transcript.
+    #[allow(dead_code)]
+    pub fn output(&self) -> &[u8] {
+        &self.crossterm_backend.writer().output
     }
 }
 
@@ -48,7 +81,7 @@ impl Write for VT100Backend {
 
 impl fmt::Display for VT100Backend {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.crossterm_backend.writer().screen().contents())
+        write!(f, "{}", self.vt100().screen().contents())
     }
 }
 

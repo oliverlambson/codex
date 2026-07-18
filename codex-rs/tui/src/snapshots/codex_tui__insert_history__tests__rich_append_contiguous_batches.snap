@@ -1,0 +1,12 @@
+---
+source: tui/src/insert_history.rs
+expression: "rows.join(\"\\n\")"
+---
+
+
+
+
+first-one rich
+first-two
+second-one
+second-two

@@ -47,13 +47,13 @@ pub enum HistoryLineWrapPolicy {
 
 /// Selects the terminal escape strategy used when writing history above the viewport.
 ///
-/// Raw lines intentionally remain unbroken so terminal selection copies their source faithfully.
-/// Zellij does not constrain soft-wrapped continuation rows to Codex's scroll region, so its raw
-/// path appends history through the terminal and reserves blank rows for the next viewport draw.
+/// Append mode writes history through the terminal and reserves blank rows for the next viewport
+/// draw. This avoids relying on partial scroll regions when the terminal or multiplexer does not
+/// constrain continuation rows to Codex's scroll region.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InsertHistoryMode {
     Standard,
-    ZellijRaw,
+    Append,
 }
 
 /// Insert `lines` above the viewport using the terminal's backend writer
@@ -160,7 +160,7 @@ where
     }
     let wrapped_lines = wrapped_rows as u16;
     match mode {
-        InsertHistoryMode::ZellijRaw => {
+        InsertHistoryMode::Append => {
             // The existing viewport is immediately replaced in the same draw pass. Clear it
             // before terminal scrolling can move composer contents into scrollback.
             terminal.clear_after_position(area.as_position())?;
@@ -481,8 +481,24 @@ mod tests {
     use super::*;
     use crate::markdown_render::render_markdown_text;
     use crate::test_backend::VT100Backend;
+    use crossterm::cursor::MoveTo;
+    use crossterm::style::Print;
     use ratatui::layout::Rect;
     use ratatui::style::Color;
+    use ratatui::style::Stylize;
+
+    fn contains_scroll_region_command(output: &[u8]) -> bool {
+        output.windows(2).enumerate().any(|(index, prefix)| {
+            if prefix != b"\x1b[" {
+                return false;
+            }
+            output[index + 2..]
+                .iter()
+                .copied()
+                .find(|byte| !byte.is_ascii_digit() && *byte != b';')
+                == Some(b'r')
+        })
+    }
 
     #[test]
     fn writes_bold_then_regular_spans() {
@@ -928,7 +944,7 @@ mod tests {
         insert_history_lines_with_mode_and_wrap_policy(
             &mut term,
             vec![line],
-            InsertHistoryMode::ZellijRaw,
+            InsertHistoryMode::Append,
             HistoryLineWrapPolicy::Terminal,
         )
         .expect("insert Zellij raw history");
@@ -964,7 +980,7 @@ mod tests {
         insert_history_lines_with_mode_and_wrap_policy(
             &mut term,
             vec![line],
-            InsertHistoryMode::ZellijRaw,
+            InsertHistoryMode::Append,
             HistoryLineWrapPolicy::Terminal,
         )
         .expect("replay Zellij raw history");
@@ -986,6 +1002,156 @@ mod tests {
         assert!(
             !viewport_rows.contains("tail-must-remain"),
             "overflowing raw tail must not be written through the viewport, rows: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn vt100_rich_append_keeps_batches_contiguous_and_composer_out_of_history() {
+        let width: u16 = 32;
+        let height: u16 = 10;
+        let backend = VT100Backend::new(width, height);
+        let mut term = crate::custom_terminal::Terminal::with_options(backend).expect("terminal");
+        let viewport = Rect::new(
+            /*x*/ 0,
+            /*y*/ height - 2,
+            /*width*/ width,
+            /*height*/ 2,
+        );
+        term.set_viewport_area(viewport);
+
+        queue!(
+            term.backend_mut(),
+            MoveTo(/*x*/ 0, viewport.top()),
+            Print("COMPOSER-FIRST"),
+            MoveTo(/*x*/ 0, viewport.bottom() - 1),
+            Print("FOOTER-FIRST")
+        )
+        .expect("prefill first viewport");
+        insert_history_lines_with_mode_and_wrap_policy(
+            &mut term,
+            vec![
+                Line::from(vec!["first-one".green().bold(), " rich".into()]),
+                Line::from("first-two"),
+            ],
+            InsertHistoryMode::Append,
+            HistoryLineWrapPolicy::PreWrap,
+        )
+        .expect("insert first rich append batch");
+
+        let viewport_top = term.viewport_area.top();
+        let viewport_bottom = term.viewport_area.bottom();
+        queue!(
+            term.backend_mut(),
+            MoveTo(/*x*/ 0, viewport_top),
+            Print("COMPOSER-SECOND"),
+            MoveTo(/*x*/ 0, viewport_bottom - 1),
+            Print("FOOTER-SECOND")
+        )
+        .expect("prefill second viewport");
+        insert_history_lines_with_mode_and_wrap_policy(
+            &mut term,
+            vec![Line::from("second-one"), Line::from("second-two")],
+            InsertHistoryMode::Append,
+            HistoryLineWrapPolicy::PreWrap,
+        )
+        .expect("insert second rich append batch");
+
+        let rows: Vec<String> = term.backend().vt100().screen().rows(0, width).collect();
+        insta::assert_snapshot!("rich_append_contiguous_batches", rows.join("\n"));
+
+        let first_two = rows
+            .iter()
+            .position(|row| row.contains("first-two"))
+            .unwrap_or_else(|| panic!("expected first batch in screen rows: {rows:?}"));
+        let second_one = rows
+            .iter()
+            .position(|row| row.contains("second-one"))
+            .unwrap_or_else(|| panic!("expected second batch in screen rows: {rows:?}"));
+        assert_eq!(
+            second_one,
+            first_two + 1,
+            "expected no blank gap between append batches, rows: {rows:?}"
+        );
+        assert!(
+            !rows
+                .iter()
+                .any(|row| row.contains("COMPOSER") || row.contains("FOOTER")),
+            "composer and footer contents must not leak into history, rows: {rows:?}"
+        );
+
+        let first_one_row = rows
+            .iter()
+            .position(|row| row.contains("first-one"))
+            .expect("first styled history row");
+        let first_one_col = rows[first_one_row]
+            .find("first-one")
+            .expect("first styled history column") as u16;
+        let screen = term.backend().vt100().screen();
+        for col in first_one_col..first_one_col + "first-one".len() as u16 {
+            let cell = screen
+                .cell(first_one_row as u16, col)
+                .expect("green bold history cell");
+            assert_eq!(cell.fgcolor(), vt100::Color::Idx(2));
+            assert!(cell.bold());
+        }
+        let rich_col = rows[first_one_row]
+            .find("rich")
+            .expect("plain rich history column") as u16;
+        for col in rich_col..rich_col + "rich".len() as u16 {
+            let cell = screen
+                .cell(first_one_row as u16, col)
+                .expect("plain history cell");
+            assert_eq!(cell.fgcolor(), vt100::Color::Default);
+            assert!(!cell.bold());
+        }
+
+        let output = term.backend().output();
+        assert!(
+            !output.windows(2).any(|window| window == b"\x1bM"),
+            "append history must not emit reverse index"
+        );
+        assert!(
+            !contains_scroll_region_command(output),
+            "append history must not emit a scroll-region command"
+        );
+    }
+
+    #[test]
+    fn vt100_rich_append_replay_keeps_pre_wrapped_tail_above_viewport() {
+        let width: u16 = 20;
+        let height: u16 = 8;
+        let backend = VT100Backend::new(width, height);
+        let mut term = crate::custom_terminal::Terminal::with_options(backend).expect("terminal");
+        term.set_viewport_area(Rect::new(
+            /*x*/ 0, /*y*/ 0, /*width*/ width, /*height*/ 2,
+        ));
+
+        let line = Line::from(format!(
+            "rich-start {} tail-must-remain",
+            "wrapped words ".repeat(10)
+        ));
+        insert_history_lines_with_mode_and_wrap_policy(
+            &mut term,
+            vec![line],
+            InsertHistoryMode::Append,
+            HistoryLineWrapPolicy::PreWrap,
+        )
+        .expect("replay rich append history");
+
+        let rows: Vec<String> = term.backend().vt100().screen().rows(0, width).collect();
+        insta::assert_snapshot!("rich_append_pre_wrapped_overflow", rows.join("\n"));
+        let history_rows = rows[..usize::from(term.viewport_area.y)]
+            .iter()
+            .map(|row| row.trim_end())
+            .collect::<String>();
+        let viewport_rows = rows[usize::from(term.viewport_area.y)..].join("\n");
+        assert!(
+            history_rows.contains("tail-must-remain"),
+            "expected pre-wrapped tail above the viewport, rows: {rows:?}"
+        );
+        assert!(
+            !viewport_rows.contains("tail-must-remain"),
+            "pre-wrapped tail must not be written through the viewport, rows: {rows:?}"
         );
     }
 
