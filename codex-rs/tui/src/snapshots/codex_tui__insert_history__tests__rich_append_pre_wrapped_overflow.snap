@@ -1,0 +1,10 @@
+---
+source: tui/src/insert_history.rs
+expression: "rows.join(\"\\n\")"
+---
+wrapped words
+wrapped words
+wrapped words
+wrapped words
+wrapped words  tail-
+must-remain
