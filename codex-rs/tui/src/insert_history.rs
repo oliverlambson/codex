@@ -5,6 +5,7 @@
 
 use std::fmt;
 use std::io;
+use std::io::BufWriter;
 use std::io::Write;
 
 use crate::render::line_utils::line_to_static;
@@ -55,6 +56,8 @@ pub(crate) enum InsertHistoryMode {
     Standard,
     Append,
 }
+
+const APPEND_OUTPUT_BUFFER_CAPACITY: usize = 64 * 1024;
 
 /// Insert `lines` above the viewport using the terminal's backend writer
 /// (avoids direct stdout references).
@@ -164,13 +167,18 @@ where
             // The existing viewport is immediately replaced in the same draw pass. Clear it
             // before terminal scrolling can move composer contents into scrollback.
             terminal.clear_after_position(area.as_position())?;
-            let writer = terminal.backend_mut();
+            // Stdout is line-buffered, so queueing a large replay directly would send each row as
+            // a separate write. Coalesce it through a bounded buffer so remote terminals can
+            // apply the existing synchronized update without visibly painting thousands of
+            // intermediate rows.
+            let mut writer =
+                BufWriter::with_capacity(APPEND_OUTPUT_BUFFER_CAPACITY, terminal.backend_mut());
             queue!(writer, MoveTo(/*x*/ 0, area.top()))?;
             for (index, line) in wrapped.iter().enumerate() {
                 if index > 0 {
                     queue!(writer, Print("\r\n"))?;
                 }
-                write_history_line(writer, line, wrap_width)?;
+                write_history_line(&mut writer, line, wrap_width)?;
             }
 
             // Writing raw source text through the terminal preserves its soft-wrap metadata.
@@ -180,6 +188,7 @@ where
                 queue!(writer, Print("\r\n"), Clear(ClearType::UntilNewLine))?;
             }
             queue!(writer, MoveTo(last_cursor_pos.x, last_cursor_pos.y))?;
+            writer.flush()?;
 
             let viewport_top = area
                 .top()
@@ -1113,6 +1122,37 @@ mod tests {
         assert!(
             !contains_scroll_region_command(output),
             "append history must not emit a scroll-region command"
+        );
+    }
+
+    #[test]
+    fn vt100_rich_append_coalesces_large_replay_writes() {
+        let width: u16 = 80;
+        let height: u16 = 10;
+        let backend = VT100Backend::new(width, height);
+        let mut term = crate::custom_terminal::Terminal::with_options(backend).expect("terminal");
+        term.set_viewport_area(Rect::new(
+            /*x*/ 0,
+            /*y*/ height - 2,
+            /*width*/ width,
+            /*height*/ 2,
+        ));
+        let lines = (0..256)
+            .map(|index| Line::from(format!("replay row {index:03}: {}", "x".repeat(32))))
+            .collect();
+
+        insert_history_lines_with_mode_and_wrap_policy(
+            &mut term,
+            lines,
+            InsertHistoryMode::Append,
+            HistoryLineWrapPolicy::PreWrap,
+        )
+        .expect("insert large rich append replay");
+
+        let max_write_size = term.backend().max_write_size();
+        assert!(
+            max_write_size > 8 * 1024,
+            "expected replay output to be coalesced, largest write was {max_write_size} bytes"
         );
     }
 

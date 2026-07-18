@@ -25,6 +25,7 @@ pub struct VT100Backend {
 struct RecordingWriter {
     parser: vt100::Parser,
     output: Vec<u8>,
+    max_write_size: usize,
 }
 
 impl RecordingWriter {
@@ -32,6 +33,7 @@ impl RecordingWriter {
         Self {
             parser: vt100::Parser::new(height, width, 0),
             output: Vec::new(),
+            max_write_size: 0,
         }
     }
 }
@@ -39,6 +41,7 @@ impl RecordingWriter {
 impl Write for RecordingWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let written = self.parser.write(buf)?;
+        self.max_write_size = self.max_write_size.max(written);
         self.output.extend_from_slice(&buf[..written]);
         Ok(written)
     }
@@ -66,6 +69,11 @@ impl VT100Backend {
     #[allow(dead_code)]
     pub fn output(&self) -> &[u8] {
         &self.crossterm_backend.writer().output
+    }
+
+    #[allow(dead_code)]
+    pub fn max_write_size(&self) -> usize {
+        self.crossterm_backend.writer().max_write_size
     }
 }
 
