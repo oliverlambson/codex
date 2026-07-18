@@ -43,23 +43,48 @@ struct TopCli {
     #[clap(flatten)]
     config_overrides: CliConfigOverrides,
 
+    /// Connect the TUI to a remote app server endpoint.
+    #[arg(long = "remote", value_name = "ADDR", hide = true)]
+    remote: Option<String>,
+
+    /// Open the resume picker without filtering sessions by working directory.
+    #[arg(long = "resume-all", hide = true, default_value_t = false)]
+    resume_all: bool,
+
     #[clap(flatten)]
     inner: Cli,
 }
 
+fn prepare_launch(
+    top_cli: TopCli,
+) -> std::io::Result<(Cli, Option<codex_tui::RemoteAppServerEndpoint>)> {
+    let mut inner = top_cli.inner;
+    if top_cli.resume_all {
+        inner.resume_picker = true;
+        inner.resume_show_all = true;
+    }
+    inner
+        .config_overrides
+        .raw_overrides
+        .splice(0..0, top_cli.config_overrides.raw_overrides);
+
+    let remote_endpoint = top_cli
+        .remote
+        .as_deref()
+        .map(codex_tui::resolve_remote_addr)
+        .transpose()
+        .map_err(std::io::Error::other)?;
+    Ok((inner, remote_endpoint))
+}
+
 fn main() -> anyhow::Result<()> {
     arg0_dispatch_or_else(|arg0_paths: Arg0DispatchPaths| async move {
-        let top_cli = TopCli::parse();
-        let mut inner = top_cli.inner;
-        inner
-            .config_overrides
-            .raw_overrides
-            .splice(0..0, top_cli.config_overrides.raw_overrides);
+        let (inner, remote_endpoint) = prepare_launch(TopCli::parse())?;
         let exit_info = run_main(
             inner,
             arg0_paths,
             LoaderOverrides::default(),
-            /*explicit_remote_endpoint*/ None,
+            remote_endpoint,
         )
         .await?;
         let is_fatal = match &exit_info.exit_reason {
@@ -81,3 +106,7 @@ fn main() -> anyhow::Result<()> {
         Ok(())
     })
 }
+
+#[cfg(test)]
+#[path = "main_tests.rs"]
+mod tests;
