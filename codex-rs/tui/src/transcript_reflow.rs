@@ -133,7 +133,7 @@ impl TranscriptReflowState {
         self.ran_during_stream = true;
     }
 
-    /// Remember that the terminal width changed while streaming or pre-consolidation cells existed.
+    /// Remember that the terminal size changed while streaming or pre-consolidation cells existed.
     ///
     /// This captures the case where the debounce did not fire before the stream finished. Without
     /// this flag, consolidation could complete without the final source-backed resize repair.

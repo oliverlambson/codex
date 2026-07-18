@@ -4605,6 +4605,32 @@ async fn height_shrink_schedules_resize_reflow() {
     assert!(app.transcript_reflow.has_pending_reflow());
 }
 
+#[tokio::test]
+async fn height_shrink_during_agent_stream_requests_post_consolidation_reflow() {
+    let (mut app, _rx, _op_rx) = make_test_app_with_channels().await;
+    let frame_requester = crate::tui::FrameRequester::test_dummy();
+    app.transcript_cells = vec![Arc::new(AgentMessageCell::new(
+        vec![Line::from("transient streamed response")],
+        /*is_first_line*/ true,
+    ))];
+
+    assert!(!app.handle_draw_size_change(
+        ratatui::layout::Size::new(/*width*/ 118, /*height*/ 35),
+        ratatui::layout::Size::new(/*width*/ 118, /*height*/ 35),
+        &frame_requester,
+    ));
+    assert!(app.handle_draw_size_change(
+        ratatui::layout::Size::new(/*width*/ 118, /*height*/ 24),
+        ratatui::layout::Size::new(/*width*/ 118, /*height*/ 35),
+        &frame_requester,
+    ));
+
+    assert!(
+        app.transcript_reflow.take_stream_finish_reflow_needed(),
+        "height-only resize must be repaired from the consolidated source cell"
+    );
+}
+
 fn test_turn(turn_id: &str, status: TurnStatus, items: Vec<ThreadItem>) -> Turn {
     Turn {
         id: turn_id.to_string(),

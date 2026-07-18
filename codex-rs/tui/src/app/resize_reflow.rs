@@ -302,7 +302,7 @@ impl App {
             self.chat_widget.on_terminal_resize(size.width);
         }
         if should_rebuild_transcript {
-            if reflow_needed && self.should_mark_reflow_as_stream_time() {
+            if self.should_mark_reflow_as_stream_time() {
                 self.transcript_reflow.mark_resize_requested_during_stream();
             }
             let target_width = reflow_needed.then_some(size.width);
